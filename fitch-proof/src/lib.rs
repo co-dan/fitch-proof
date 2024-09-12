@@ -7,7 +7,7 @@ mod formatter;
 mod parser;
 mod proof;
 mod util;
-use crate::data::{ProofResult, Wff};
+use crate::data::{ProofResult, Wff, CheckError};
 
 macro_rules! default_variable_names {
     () => {
@@ -29,9 +29,51 @@ pub fn check_proof(proof: &str, allowed_variable_names: &str) -> String {
     let res = check_proof_to_proofresult(proof, allowed_variable_names);
     match res {
         ProofResult::Correct => "The proof is correct!".to_string(),
-        ProofResult::Error(errs) => errs.join("\n\n"),
+        ProofResult::Error(errs) => extract_errors(errs),
         ProofResult::FatalError(err) => format!("Fatal error: {err}"),
     }
+}
+
+pub fn extract_errors(errs : Vec<CheckError>) -> String {
+    let mut errs =
+        errs
+        .iter()
+        .map(|x| {
+            // TODO: why do i need to copy here?
+            match x.fitch_line {
+                None => x.err_txt.clone(),
+                Some(n) => format!("Line {}: {}", n, x.err_txt.clone())
+            }
+        })
+        .collect::<Vec<String>>();
+    util::natural_sort(&mut errs);
+    return errs.join("\n\n")
+}
+
+// TODO duplication, this one gives also line numbers
+pub fn check_proof_full(proof: &str, allowed_variable_names: &str) -> String {
+    let res = check_proof_to_proofresult(proof, allowed_variable_names);
+    match res {
+        ProofResult::Correct => "The proof is correct!".to_string(),
+        ProofResult::Error(errs) => extract_errors_full(errs),
+        ProofResult::FatalError(err) => format!("Fatal error: {err}"),
+    }
+}
+
+pub fn extract_errors_full(errs : Vec<CheckError>) -> String {
+    let mut errs =
+        errs
+        .iter()
+        .map(|x| {
+            // TODO: why do i need to copy here?
+            match x.fitch_line {
+                None => x.err_txt.clone(),
+                Some(n) => format!("Line {}: (Fitch line {}) {}", x.real_line, n, x.err_txt.clone())
+            }
+        })
+        .collect::<Vec<String>>();
+    util::natural_sort(&mut errs);
+    return errs.join("\n\n")
 }
 
 /// Checks if a string is a fully correct proof that matches a given proof template.
@@ -52,7 +94,7 @@ pub fn check_proof_with_template(
     let res = check_proof_to_proofresult_with_template(proof, &template, allowed_variable_names);
     match res {
         ProofResult::Correct => "The proof is correct!".to_string(),
-        ProofResult::Error(errs) => errs.join("\n\n"),
+        ProofResult::Error(errs) => extract_errors(errs),
         ProofResult::FatalError(err) => format!("Fatal error: {err}"),
     }
 }

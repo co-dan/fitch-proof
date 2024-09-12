@@ -1,7 +1,6 @@
 use crate::data::*;
 use crate::formatter;
 use crate::proof::*;
-use crate::util;
 use std::collections::{HashMap, HashSet};
 use std::iter::zip;
 
@@ -103,6 +102,12 @@ impl Proof {
         }
 
         let result_without_template_check = self.is_fully_correct();
+        let mut template_errors = template_errors.iter().map(|e| CheckError
+                                                  { in_file: None,
+                                                    real_line: 0,
+                                                    fitch_line: None,
+                                                    err_txt: e.clone() }).collect();
+
         match result_without_template_check {
             // If the proof generates a fatal error by itself, the user is not interested in
             // template matching errors.
@@ -127,12 +132,14 @@ impl Proof {
     ///
     /// When you want to fully assess the validity of a proof, you should first [Proof::construct] the proof, and then run this function.
     fn is_fully_correct(&self) -> ProofResult {
-        let mut errors: Vec<String> = vec![]; // here we accumulate all errors
+        let in_file : Option<String> = None; // TODO
+        let mut errors: Vec<CheckError> = vec![]; // here we accumulate all errors
 
         // check that user applied proof rule correctly everywhere
-        for line in &self.lines {
-            if let Err(err) = self.check_line(line) {
-                errors.push(err.to_string());
+        for (i, line) in self.lines.iter().enumerate() {
+            if let Err(mut err) = self.check_line(line) {
+                err.real_line = i+1;
+                errors.push(err);
             }
         }
 
@@ -145,9 +152,12 @@ impl Proof {
                 )
             })
         {
-            errors.push(
-                "Each proof should start start with zero or more premises, followed by a Fitch bar"
-                    .to_string(),
+            errors.push(CheckError
+                        { in_file: None,
+                          real_line: 0,
+                          fitch_line: None,
+                          err_txt: "Each proof should start start with zero or more premises, followed by a Fitch bar".to_string()
+                        }
             );
         }
 
@@ -155,8 +165,13 @@ impl Proof {
         errors.extend(
             self.line_numbers_missing_justification()
                 .iter()
-                .map(|n| format!("Line {n}: missing justification").to_string()),
-        );
+                .map(|n|
+                     CheckError {
+                         in_file: None,
+                         real_line: 0, // TODO real line number
+                         fitch_line: Some(*n),
+                         err_txt: "missing justification".to_string()
+                     }));
 
         // check that all variables are bound, that user doesn't have nested quantifiers over the
         // same variable and that users don't quantify over a constant, and that the user does not make
@@ -166,36 +181,45 @@ impl Proof {
                 .iter()
                 .filter(|line| line.sentence.is_some())
                 .map(|line| {
+                    // TODO convert it to the right type
                     self.check_variable_scoping_naming_issues(
                         line.sentence.as_ref().unwrap(),
                         line.line_num.unwrap(),
                     )
                 })
                 .filter(|r| r.is_err())
-                .map(|r| r.unwrap_err()),
+                .map(|r| CheckError::from_string(r.unwrap_err())),
         );
 
         // check that user does not use a symbol to denote both a constant and a function, and that
         // arities of function symbols are consistent throughout the proof.
-        errors.extend(self.generate_arity_errors());
+        errors.extend(self.generate_arity_errors().iter()
+                      .map(|r| CheckError::from_string(r.clone())));
 
         // check that user doesn't use boxed constant outside the subproof and that user does not
         // introduce the same boxed constant twice in nested subproofs, and that boxed constants
         // are actually constants (not variables or predicates or ...)
         if let Err(errs) = self.check_boxed_constant_outside_subproof() {
-            errors.extend(errs);
+            // TODO
+            errors.extend(errs.iter().map(|r| CheckError::from_string(r.clone()))); 
         }
 
         // check that last line is top-level
         if self.last_line_is_inside_subproof() {
             let lln = self.last_line_num();
-            errors.push(format!("Line {lln}: last line of proof should not be inside subproof"));
+            errors.push(CheckError
+                        { in_file: in_file,
+                          real_line: 0,
+                          fitch_line: Some(lln),
+                          err_txt: "last line of proof should not be inside subproof".to_string()
+                        });
         }
 
         if errors.is_empty() {
             ProofResult::Correct
         } else {
-            util::natural_sort(&mut errors);
+            // TODO!!!! implement sorting
+            //util::natural_sort(&mut errors);
             ProofResult::Error(errors)
         }
     }
@@ -666,22 +690,50 @@ impl Proof {
         &self,
         referencing_line: usize,
         requested_line: usize,
-    ) -> Result<&Wff, String> {
+    ) -> Result<&Wff, CheckError> {
+        // TODO
+        let in_file : Option<String> = None;
+        let real_line : usize = usize::MAX;
+
         let li = self.lines.iter().find(|l| l.line_num == Some(requested_line));
         if let Some(l) = li {
             if let Some(wff) = &l.sentence {
                 if self.can_reference(referencing_line, requested_line) {
                     Ok(wff)
                 } else if requested_line < referencing_line {
-                    Err(format!("Line {referencing_line}: line {requested_line} is referenced in the justification, but this is not allowed, because line {requested_line} is inside an already closed subproof."))
+                    Err (CheckError {
+                        in_file: in_file,
+                        real_line: real_line,
+                        fitch_line: Some(referencing_line),
+                        err_txt:
+                        format!("line {requested_line} is referenced in the justification, but this is not allowed, because line {requested_line} is inside an already closed subproof.")
+                    })
                 } else {
-                    Err(format!("Line {referencing_line}: line {requested_line} is referenced in the justification, but this is not allowed, because line {requested_line} does not come before line {referencing_line}."))
+                    Err (CheckError {
+                        in_file: in_file,
+                        real_line: real_line,
+                        fitch_line: Some(referencing_line),
+                        err_txt:
+                        format!("line {requested_line} is referenced in the justification, but this is not allowed, because line {requested_line} does not come before line {referencing_line}.")
+                    })
                 }
             } else {
-                Err(format!("Line {referencing_line}: line {requested_line} is being referenced in the justification, but that line does not contain a sentence."))
+                Err (CheckError {
+                    in_file: in_file,
+                    real_line: real_line,
+                    fitch_line: Some(referencing_line),
+                    err_txt:
+                    format!("line {requested_line} is being referenced in the justification, but that line does not contain a sentence.")
+                })
             }
         } else {
-            Err(format!("Line {referencing_line}: line {requested_line} is being referenced in the justification, but that line does not exist."))
+            Err (CheckError {
+                in_file: in_file,
+                real_line: real_line,
+                fitch_line: Some(referencing_line),
+                err_txt:
+                format!("line {requested_line} is being referenced in the justification, but that line does not exist.")
+            })
         }
     }
 
@@ -700,19 +752,23 @@ impl Proof {
         &self,
         referencing_line: usize,
         (subproof_begin, subproof_end): (usize, usize),
-    ) -> Result<(&ProofLine, &ProofLine), String> {
+    ) -> Result<(&ProofLine, &ProofLine), CheckError> {
         if self.scope[referencing_line].1.contains(&(subproof_begin, subproof_end)) {
             let s_begin = self.lines.iter().find(|l| l.line_num == Some(subproof_begin)).unwrap();
             // the unwrap should work, since `scope` should refer only to valid line numbers
             let s_end = self.lines.iter().find(|l| l.line_num == Some(subproof_end)).unwrap();
             Ok((s_begin, s_end))
         } else {
-            Err(format!(
-                "Line {referencing_line}: the referenced \
+            Err(CheckError
+                { in_file: None, // TODO
+                  real_line: usize::MAX, // TODO
+                  fitch_line: Some(referencing_line),
+                  err_txt:
+                  format!("the referenced \
                         subproof {subproof_begin}-{subproof_end} is \
                         not in the scope of line {referencing_line}, \
-                        or it does not exist."
-            ))
+                        or it does not exist.")
+                })
         }
     }
 
@@ -724,17 +780,27 @@ impl Proof {
     /// line, or an empty line, since in those cases there is no justification to check.
     ///
     /// Note that the provided [ProofLine] should exist in the proof!
-    fn check_line(&self, line: &ProofLine) -> Result<(), String> {
+    fn check_line(&self, line: &ProofLine) -> Result<(),CheckError> {
         // this function only checks lines that have a justification...
         if line.justification.is_none() {
             return Ok(());
         }
 
+        let curr_real_line:usize = usize::MAX;
+        let in_file:Option<String> = None;
         let mut curr_line_num: usize = usize::MAX;
         if let Some(line_num) = line.line_num {
             curr_line_num = line_num;
         }
-
+        let mk_err = |s : String| {
+            CheckError
+            { in_file: in_file,
+              real_line: curr_real_line,
+              fitch_line: line.line_num,
+              err_txt: s
+            }
+        };
+        
         let (curr_wff, just) =
             (line.sentence.as_ref().unwrap(), line.justification.as_ref().unwrap());
         match just {
@@ -743,44 +809,41 @@ impl Proof {
                 if curr_wff == ref_wff {
                     Ok(())
                 } else {
-                    Err(format!(
-                        "Line {curr_line_num}: the \
-                                           proof rule Reit is used, but the sentence \
-                                           in this line is not the same as the sentence \
-                                           in the referenced line."
-                    ))
+                    Err (mk_err (format!("proof rule Reit is used, but the sentence \
+                                      in this line is not the same as the sentence \
+                                      in the referenced line {n}")))
                 }
             }
             Justification::AndIntro(ns) => {
                 if let Wff::And(conjs) = curr_wff {
                     if ns.len() != conjs.len() {
-                        return Err(format!(
-                            "Line {curr_line_num}: the rule ∧Intro is used, but the number of \
-                            conjuncts ({}) of the sentence in line {curr_line_num} is not equal \
-                            to the number of referenced proof lines ({}).",
-                            conjs.len(),
-                            ns.len()
-                        ));
+                        return Err (mk_err
+                            (format!("the rule ∧Intro is used, but the number of \
+                                     conjuncts ({}) of the sentence in line {curr_line_num} is not equal \
+                                     to the number of referenced proof lines ({}).",
+                                    conjs.len(),
+                                       ns.len())
+                            ));
                     }
                     for i in 0..ns.len() {
                         if &conjs[i] != self.get_wff_at_line(curr_line_num, ns[i])? {
-                            return Err(format!(
-                                "Line {curr_line_num}: the rule ∧Intro is used, but the {}\'th \
+                            return Err (mk_err 
+                                        (format!(
+                                "the rule ∧Intro is used, but the {}\'th \
                                 conjunct of the sentence in that line is not the same as \
                                 the sentence found in line {} (the {}\'th \
                                 line referenced in the justification).",
                                 i + 1,
                                 ns[i],
                                 i + 1
-                            ));
+                                           )));
                         }
                     }
-                    Ok(())
+                    return Ok(())
                 } else {
-                    Err(format!(
-                        "Line {curr_line_num}: the justification ∧Intro is \
-                                used, but the top-level connective of this line is not ∧."
-                    ))
+                    Err (mk_err (format!("the justification ∧Intro is \
+                                used, but the top-level connective of this line is not ∧.")
+                          ))
                 }
             }
             Justification::AndElim(n) => {
@@ -789,19 +852,18 @@ impl Proof {
                     if conjs.iter().any(|conj| conj == curr_wff) {
                         Ok(())
                     } else {
-                        Err(format!(
-                            "Line {curr_line_num}: the justification \
+                        Err (mk_err (format!("the justification \
                             ∧Elim: {n} is used, but none of the \
                             conjuncts in line {n} is identical \
-                            to the sentence found in line {curr_line_num}."
-                        ))
+                            to the sentence found in line {curr_line_num}.")
+                          ))
                     }
                 } else {
-                    Err(format!(
-                        "Line {curr_line_num}: the justification \
-                        ∧Elim: {n} is used, but the top-level \
-                        connective of line {n} is not a conjunction."
-                    ))
+                    Err (mk_err (format!(
+                           "Line {curr_line_num}: the justification \
+                           ∧Elim: {n} is used, but the top-level \
+                           connective of line {n} is not a conjunction.")
+                         ))
                 }
             }
             Justification::OrIntro(n) => {
@@ -810,38 +872,38 @@ impl Proof {
                     if disjs.iter().any(|disj| disj == ref_wff) {
                         Ok(())
                     } else {
-                        Err(format!(
-                            "Line {curr_line_num}: the justification \
+                        Err(mk_err (format!(
+                            "the justification \
                             ∨Intro: {n} is used, but none of the \
                             disjuncts in line {curr_line_num} is identical \
                             to the sentence found in line {n}."
-                        ))
+                        )))
                     }
                 } else {
-                    Err(format!(
-                        "Line {curr_line_num}: the justification \
+                    Err(mk_err (format!(
+                        "the justification \
                         ∨Intro is used, but the top-level \
                         connective of this line is not a disjunction."
-                    ))
+                    )))
                 }
             }
             Justification::OrElim(n, subproofs) => {
                 let Wff::Or(disjs) = self.get_wff_at_line(curr_line_num, *n)? else {
-                    return Err(format!(
-                        "Line {curr_line_num}: ∨Elim: {n}, ..... \
+                    return Err(mk_err (format!(
+                        "∨Elim: {n}, ..... \
                         is used, but the top-level connective of \
                         the sentence at line {n} is not ∨."
-                    ));
+                    )));
                 };
                 if disjs.len() != subproofs.len() {
-                    return Err(format!(
-                        "Line {curr_line_num}: the rule ∨Elim: {n}, ..... \
+                    return Err(mk_err (format!(
+                        "the rule ∨Elim: {n}, ..... \
                             is used, but the number of disjuncts ({}) \
                             of the sentence in line {n} is not equal to \
                             the number of referenced subproofs ({}).",
                         disjs.len(),
                         subproofs.len()
-                    ));
+                    )));
                 }
                 for (disj, subprf) in zip(disjs, subproofs) {
                     let (s_begin, s_end) = self.get_subproof_at_lines(curr_line_num, *subprf)?;
@@ -850,72 +912,72 @@ impl Proof {
                         &s_end.sentence,
                         &s_begin.constant_between_square_brackets,
                     ) else {
-                        return Err(format!(
-                            "Line {curr_line_num}: when using ∨Elim, \
+                        return Err(mk_err (format!(
+                            "when using ∨Elim, \
                             you cannot reference subproofs which \
                             introduce a boxed constant."
-                        ));
+                        )));
                     };
                     if disj != s_begin_wff {
-                        return Err(format!(
-                            "Line {curr_line_num}: ∨Elim: {n}, ..... \
+                        return Err(mk_err (format!(
+                            "∨Elim: {n}, ..... \
                             is used, but the premise of one of the \
                             referenced subproofs does not match the \
                             corresponding disjunct of the sentence at line {n}. \
                             Note that the subproofs should be referenced in the \
                             order in which their corresponding premises \
                             appear as disjuncts in the sentence at line {n}."
-                        ));
+                        )));
                     }
                     if s_end_wff != curr_wff {
-                        return Err(format!(
-                            "Line {curr_line_num}: ∨Elim \
+                        return Err(mk_err (format!(
+                            "∨Elim \
                             is used, but not all referenced subproofs end with \
                             the same sentence as the sentence in line {curr_line_num}."
-                        ));
+                        )));
                     }
                 }
                 Ok(())
             }
             Justification::ImpliesIntro((n, m)) => {
                 let Wff::Implies(a, b) = curr_wff else {
-                    return Err(format!(
-                        "Line {curr_line_num}: →Intro is used, but \
+                    return Err(mk_err (format!(
+                        "→Intro is used, but \
                             the top-level connective of the sentence at this line \
                             is not an implication."
-                    ));
+                    )));
                 };
                 let (s_begin, s_end) = self.get_subproof_at_lines(curr_line_num, (*n, *m))?;
                 if let (Some(s_begin_wff), Some(s_end_wff), None) =
                     (&s_begin.sentence, &s_end.sentence, &s_begin.constant_between_square_brackets)
                 {
                     if **a != *s_begin_wff && **b == *s_end_wff {
-                        Err(format!(
-                            "Line {curr_line_num}: →Intro is used, but \
+                        Err(mk_err (format!(
+                            "→Intro is used, but \
                                 the premise of the referenced subproof does not match the \
                                 antecedent of the implication found in line {curr_line_num}."
-                        ))
+                        )))
                     } else if **a == *s_begin_wff && **b != *s_end_wff {
-                        Err(format!(
-                            "Line {curr_line_num}: →Intro is used, but \
+                        Err(mk_err (format!(
+                            "→Intro is used, but \
                                 the last sentence of the referenced subproof does not match the \
                                 consequent of the implication found in line {curr_line_num}."
-                        ))
+                        )))
                     } else if **a != *s_begin_wff && **b != *s_end_wff {
-                        Err(format!(
-                            "Line {curr_line_num}: →Intro is used, but \
+                        Err(mk_err (format!(
+                            "→Intro is used, but \
                                 the premise and last sentence of the referenced subproof \
                                 do not match the antecedent and the consequent, respectively, \
                                 of the implication found in line {curr_line_num}."
-                        ))
+                        )))
                     } else {
                         Ok(())
                     }
                 } else {
-                    Err(format!(
-                        "Line {curr_line_num}: when using →Intro, you \
+                    Err(mk_err (format!(
+                        "when using →Intro, you \
                         cannot reference a subproof that introduces a boxed constant."
-                    ))
+                    )))
                 }
             }
             Justification::ImpliesElim(n, m) => {
@@ -924,17 +986,17 @@ impl Proof {
                     if *wff_m == **wff1 && **wff2 == *curr_wff {
                         Ok(())
                     } else {
-                        Err(format!(
-                            "Line {curr_line_num}: the rule \
+                        Err(mk_err (format!(
+                            "the rule \
                                                →Elim is wrongly used."
-                        ))
+                        )))
                     }
                 } else {
-                    Err(format!(
-                        "Line {curr_line_num}: the rule \
+                    Err(mk_err (format!(
+                        "the rule \
                                            →Elim: {n}, {m} is used, but the top-level \
                                            connective of line {n} is not an implication."
-                    ))
+                    )))
                 }
             }
             Justification::BicondIntro((sb1, se1), (sb2, se2)) => {
@@ -965,13 +1027,13 @@ impl Proof {
                         {
                             Ok(())
                         } else {
-                            Err(format!("Line {curr_line_num}: when using ↔Intro to infer P↔Q, you must first cite the subproof that proves P→Q, and then the subproof that proves Q→P."))
+                            Err(mk_err (format!("when using ↔Intro to infer P↔Q, you must first cite the subproof that proves P→Q, and then the subproof that proves Q→P.")))
                         }
                     } else {
-                        Err(format!("Line {curr_line_num}: when using ↔Intro, you cannot reference a subproof that introduces a boxed constant."))
+                        Err(mk_err (format!("when using ↔Intro, you cannot reference a subproof that introduces a boxed constant.")))
                     }
                 } else {
-                    Err(format!("Line {curr_line_num}: ↔Intro is used, but the top-level connective of this sentence is not a bi-implication."))
+                    Err(mk_err (format!("↔Intro is used, but the top-level connective of this sentence is not a bi-implication.")))
                 }
             }
             Justification::BicondElim(n, m) => {
@@ -982,10 +1044,10 @@ impl Proof {
                     {
                         Ok(())
                     } else {
-                        Err(format!("Line {curr_line_num}: the rule ↔Elim is wrongly used."))
+                        Err(mk_err (format!("the rule ↔Elim is wrongly used.")))
                     }
                 } else {
-                    Err(format!("Line {curr_line_num}: the rule ↔Elim: {n}, {m} is used, but the top-level connective of line {n} is not a bi-implication."))
+                    Err(mk_err (format!("the rule ↔Elim: {n}, {m} is used, but the top-level connective of line {n} is not a bi-implication.")))
                 }
             }
             Justification::NotIntro((n, m)) => {
@@ -998,33 +1060,33 @@ impl Proof {
                             if *s_end_wff == Wff::Bottom {
                                 Ok(())
                             } else {
-                                Err(format!(
-                                    "Line {curr_line_num}: ¬Intro is used, \
+                                Err(mk_err (format!(
+                                    "¬Intro is used, \
                                     but the last sentence in the referenced \
                                     subproof is not ⊥."
-                                ))
+                                )))
                             }
                         } else {
-                            Err(format!(
-                                "Line {curr_line_num}: ¬Intro is \
+                            Err(mk_err (format!(
+                                "¬Intro is \
                                             used, but the negation of the premise \
                                             of the referenced subproof does \
                                             not match this line."
-                            ))
+                            )))
                         }
                     } else {
-                        Err(format!(
-                            "Line {curr_line_num}: ¬Intro is \
+                        Err(mk_err (format!(
+                            "¬Intro is \
                             used, but the referenced subproof is not \
                             of the proper form. You cannot use ¬Intro \
                             on a subproof that introduces a boxed constant."
-                        ))
+                        )))
                     }
                 } else {
-                    Err(format!(
-                        "Line {curr_line_num}: ¬Intro is used, \
+                    Err(mk_err (format!(
+                        "¬Intro is used, \
                         but the top-level connective of the sentence in this line is not ¬."
-                    ))
+                    )))
                 }
             }
             Justification::NotElim(n) => {
@@ -1038,11 +1100,12 @@ impl Proof {
                 if let Wff::Not(negd_wff) = curr_wff {
                     if let Wff::Not(negd_negd_wff) = &**negd_wff {
                         if *self.get_wff_at_line(curr_line_num, *n)? == **negd_negd_wff {
-                            return Err(format!("Line {curr_line_num}: ¬Elim can only be used to go from ¬¬P to P, not the other way around"));
+                            return Err(mk_err (format!(
+                                "¬Elim can only be used to go from ¬¬P to P, not the other way around")));
                         }
                     }
                 }
-                Err(format!("Line {curr_line_num}: ¬Elim is used improperly"))
+                Err(mk_err (format!("¬Elim is used improperly")))
             }
             Justification::BottomIntro(n, m) => {
                 let wff1 = self.get_wff_at_line(curr_line_num, *n)?;
@@ -1052,20 +1115,20 @@ impl Proof {
                         return Ok(());
                     }
                 }
-                Err(format!(
-                    "Line {curr_line_num}: ⊥Intro: {n}, {m} is used, \
+                Err(mk_err (format!(
+                    "⊥Intro: {n}, {m} is used, \
                     but the sentence at line {m} is not the negation \
                     of the sentence at line {n}"
-                ))
+                )))
             }
             Justification::BottomElim(n) => {
                 if let Wff::Bottom = self.get_wff_at_line(curr_line_num, *n)? {
                     Ok(())
                 } else {
-                    Err(format!(
-                        "Line {curr_line_num}: ⊥Elim: {n} is \
+                    Err(mk_err (format!(
+                        "⊥Elim: {n} is \
                         used, but the sentence at line {n} is not ⊥."
-                    ))
+                    )))
                 }
             }
             Justification::EqualsIntro => {
@@ -1074,15 +1137,15 @@ impl Proof {
                         return Ok(());
                     }
                 }
-                Err(format!("Line {curr_line_num}: =Intro is wrongly used"))
+                Err(mk_err (format!("=Intro is wrongly used")))
             }
             Justification::EqualsElim(n, m) => {
                 let Wff::Equals(subst_old, subst_new) = self.get_wff_at_line(curr_line_num, *m)?
                 else {
-                    return Err(format!(
-                        "Line {curr_line_num}: the rule =Elim:{n},{m} \
+                    return Err(mk_err (format!(
+                        "the rule =Elim:{n},{m} \
                         is used, but line {m} is not of the form (term1) = (term2)"
-                    ));
+                    )));
                 };
 
                 if substitution_applied_wff_one_or_more_times(
@@ -1092,54 +1155,55 @@ impl Proof {
                 ) {
                     Ok(())
                 } else {
-                    Err(format!(
-                        "Line {curr_line_num}: the rule =Elim:{n},{m} \
+                    Err(mk_err (format!(
+                        "the rule =Elim:{n},{m} \
                             is used, but is is impossible to obtain line {curr_line_num} \
                             from line {n} by changing one or more occurrences of {} to {}",
                         formatter::format_term(subst_old),
                         formatter::format_term(subst_new),
-                    ))
+                    )))
                 }
             }
             Justification::ForallIntro((sb, se)) => {
                 let Wff::Forall(var, forall_curr_wff) = curr_wff else {
-                    return Err(format!(
-                        "Line {curr_line_num}: the rule ∀Intro is used, \
+                    return Err(mk_err (format!(
+                        "the rule ∀Intro is used, \
                     but the sentence at this line is not universally quantified at the top-level"
-                    ));
+                    )));
                 };
                 let (s_begin, s_end) = self.get_subproof_at_lines(curr_line_num, (*sb, *se))?;
                 let Some(boxed_const @ Term::Atomic(bc)) =
                     &s_begin.constant_between_square_brackets
                 else {
-                    return Err(format!(
-                        "Line {curr_line_num}: the rule ∀Intro is used, but the \
+                    return Err(mk_err (format!(
+                        "the rule ∀Intro is used, but the \
                         referenced subproof does not introduce a boxed constant"
-                    ));
+                    )));
                 };
                 if s_begin.sentence.is_some() {
-                    return Err(format!(
-                            "Line {curr_line_num}: when using ∀Intro, the premise of the referenced subproof \
+                    return Err(mk_err (format!(
+                            "when using ∀Intro, the premise of the referenced subproof \
                             should consist of solely a boxed constant, without a sentence"
-                    ));
+                    )));
                 }
                 if apply_trivial_substitution_everywhere_to_wff(
                     forall_curr_wff,
                     (&Term::Atomic(var.to_string()), boxed_const),
                 ) != *s_end.sentence.as_ref().unwrap()
                 {
-                    return Err(format!("Line {curr_line_num}: the rule ∀Intro:{sb}-{se} is used, but if all occurrences of {var} in the quantified part of line {curr_line_num} are replaced by {bc}, one does not obtain the sentence in line {se}"));
+                    return Err(mk_err (format!(
+                        "the rule ∀Intro:{sb}-{se} is used, but if all occurrences of {var} in the quantified part of line {curr_line_num} are replaced by {bc}, one does not obtain the sentence in line {se}")));
                 }
 
                 Ok(())
             }
             Justification::ForallElim(n) => {
                 let Wff::Forall(var, ref_wff) = self.get_wff_at_line(curr_line_num, *n)? else {
-                    return Err(format!(
-                        "Line {curr_line_num}: the justification \
+                    return Err(mk_err (format!(
+                        "the justification \
                         ∀Elim:{n} is used, but the sentence at line {n} is not a \
                         universally quantified sentence at the top level"
-                    ));
+                    )));
                 };
                 if let Some((term1, term2)) =
                     find_possible_trivial_substitution_wff(ref_wff, curr_wff)
@@ -1151,32 +1215,32 @@ impl Proof {
                         return if self.is_closed_term(&term2) {
                             Ok(())
                         } else {
-                            Err(format!(
-                                "Line {curr_line_num}: the rule ∀Elim:{n} is used, \
+                            Err(mk_err (format!(
+                                "the rule ∀Elim:{n} is used, \
                                  but {} is not a closed term (so you cannot substitute {}
                                  for all occurences of {var} in line {})",
                                 formatter::format_term(&term2),
                                 formatter::format_term(&term2),
                                 *n
-                            ))
+                            )))
                         };
                     }
                 }
                 if &**ref_wff == curr_wff {
                     return Ok(());
                 }
-                Err(format!(
-                    "Line {curr_line_num}: the rule ∀Elim:{n} is used, but there is no \
+                Err(mk_err (format!(
+                    "the rule ∀Elim:{n} is used, but there is no \
                     appropriate substitution between line {n} and line {curr_line_num}"
-                ))
+                )))
             }
             Justification::ExistsIntro(n) => {
                 let Wff::Exists(var, exists_curr_wff) = curr_wff else {
-                    return Err(format!(
-                        "Line {curr_line_num}: the justification \
+                    return Err(mk_err (format!(
+                        "the justification \
                         ∃Intro:{n} is used, but the sentence at line {curr_line_num} is not an \
                         existentially quantified sentence at the top level"
-                    ));
+                    )));
                 };
                 let ref_wff = self.get_wff_at_line(curr_line_num, *n)?;
                 if let Some((term1, term2)) =
@@ -1191,42 +1255,42 @@ impl Proof {
                         return if self.is_closed_term(&term2) {
                             Ok(())
                         } else {
-                            Err(format!(
-                                "Line {curr_line_num}: the rule ∃Intro:{n} is \
+                            Err(mk_err (format!(
+                                "the rule ∃Intro:{n} is \
                                 used, but {} in line {} is not a closed term",
                                 formatter::format_term(&term2),
                                 *n
-                            ))
+                            )))
                         };
                     }
                 }
                 if **exists_curr_wff == *ref_wff {
                     return Ok(());
                 }
-                Err(format!(
-                    "Line {curr_line_num}: the rule ∃Intro:{n} is used, but there is no \
+                Err(mk_err (format!(
+                    "the rule ∃Intro:{n} is used, but there is no \
                     appropriate substitution between line {n} and line {curr_line_num}"
-                ))
+                )))
             }
             Justification::ExistsElim(n, (sb, se)) => {
                 let ref_wff = self.get_wff_at_line(curr_line_num, *n)?;
                 let (s_begin, s_end) = self.get_subproof_at_lines(curr_line_num, (*sb, *se))?;
                 let Wff::Exists(var, exists_ref_wff) = ref_wff else {
-                    return Err(format!(
-                        "Line {curr_line_num}: the rule ∃Elim:{n},{sb}-{se} \
+                    return Err(mk_err (format!(
+                        "the rule ∃Elim:{n},{sb}-{se} \
                     is used, but the sentence at line {n} ({}) is not an existentially \
                     quantified sentence at the top-level",
                         formatter::format_wff(ref_wff)
-                    ));
+                    )));
                 };
 
                 let Some(bc_term @ Term::Atomic(bc)) = &s_begin.constant_between_square_brackets
                 else {
-                    return Err(format!("Line {curr_line_num}: the rule ∃Elim:{n},{sb}-{se} is used, but the referenced subproof does not introduce a boxed constant in line {sb}."));
+                    return Err(mk_err (format!("the rule ∃Elim:{n},{sb}-{se} is used, but the referenced subproof does not introduce a boxed constant in line {sb}.")));
                 };
 
                 if s_begin.sentence.is_none() {
-                    return Err(format!("Line {curr_line_num}: the rule ∃Elim:{n},{sb}-{se} is used, but line {sb} contains only a boxed constant; when using ∃Elim, it should contain both a boxed constant and a sentence"));
+                    return Err(mk_err (format!("the rule ∃Elim:{n},{sb}-{se} is used, but line {sb} contains only a boxed constant; when using ∃Elim, it should contain both a boxed constant and a sentence")));
                 }
                 if apply_trivial_substitution_everywhere_to_wff(
                     exists_ref_wff,
@@ -1236,17 +1300,17 @@ impl Proof {
                     if s_end.sentence.as_ref().unwrap() == curr_wff {
                         Ok(())
                     } else {
-                        Err(format!(
-                            "Line {curr_line_num}: the rule ∃Elim:{n},{sb}-{se} \
+                        Err(mk_err (format!(
+                            "the rule ∃Elim:{n},{sb}-{se} \
                         is used, but the sentence in line {se} ({}) is not the same as \
                         the sentence in line {curr_line_num} ({})",
                             formatter::format_wff(s_end.sentence.as_ref().unwrap()),
                             formatter::format_wff(curr_wff),
-                        ))
+                        )))
                     }
                 } else {
-                    Err(format!(
-                        "Line {curr_line_num}: the rule ∃Elim:{n},{sb}-{se} \
+                    Err(mk_err (format!(
+                        "the rule ∃Elim:{n},{sb}-{se} \
                         is used, but if one substitutes {bc} for all free \
                         occurences of {var} in the quantified part of the sentence \
                         in line {n} ({}), one obtains {}, but this is not equal to the \
@@ -1257,7 +1321,7 @@ impl Proof {
                             (&Term::Atomic(var.to_string()), bc_term)
                         )),
                         formatter::format_wff(s_begin.sentence.as_ref().unwrap())
-                    ))
+                    )))
                 }
             }
         }

@@ -129,13 +129,31 @@ pub enum Justification {
     Reit(usize),
 }
 
+#[derive(Debug)]
+pub struct CheckError {
+    // Error occurred in this file
+    pub in_file: Option<String>,
+    // The real line number in the file
+    pub real_line: usize,
+    // The Fitch line number
+    pub fitch_line: Option<usize>,
+    // The error text
+    pub err_txt : String
+}
+
+impl CheckError {
+    pub fn from_string(s : String) -> CheckError {
+        CheckError { in_file: None, real_line: usize::MAX, fitch_line: None, err_txt: s }
+    }
+}
+
 pub enum ProofResult {
     /// No mistakes; proof is correct.
     Correct,
     /// An 'error' is a mistake that makes the proof wrong, but still allows
     /// the checker to go on and find other mistakes. This [ProofResult::Error]
     /// variant denotes the list of errors that was obtained during analysis.
-    Error(Vec<String>),
+    Error(Vec<CheckError>),
     /// A mistake that is so severe that the checker cannot continue its analysis.
     /// When a fatal error occurs, this fatal error will be returned to the user,
     /// with no other error messages along it.
